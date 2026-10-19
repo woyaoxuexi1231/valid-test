@@ -1,0 +1,10 @@
+server:
+  port: 8099
+
+spring:
+  application:
+    name: valid-test
+
+logging:
+  level:
+    org.hibernate.validator: INFO
