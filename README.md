@@ -1,123 +1,113 @@
-# valid-test · Bean Validation 动手实验
-
-把「校验规范 / 注解 / 触发器 / 手动 validate」拆成 5 个可 curl 的接口，对照玩。
+# valid-test · 按文件读，就能看出三层
 
 仓库：[woyaoxuexi1231/valid-test](https://github.com/woyaoxuexi1231/valid-test)
 
-## 怎么跑
+这个项目不是「五个互不相关的接口」。它是同一套规则的三种触发方式。打开代码时只看两件事：
+
+1. **文件在哪个包**（`dto` / `service` / `web`）
+2. **import 是哪个包名**
+
+## 三层分别在哪
+
+```text
+dto/     规则        jakarta.validation.constraints     Java 标准注解
+                     org.hibernate.validator.constraints Hibernate 扩展（只有 @Length）
+service/ 手动触发    jakarta.validation.Validator        标准 API，自己调 validate()
+web/     框架触发    jakarta.validation.Valid            标准触发器，Spring MVC 帮你调
+                     org.springframework...Validated     Spring 多出来的（分组、方法参数）
+```
+
+不用 Spring 时：保留 `dto` 的注解，在边界自己写 `service` 里那一行 `validate()`。
+切面不是必须。只有想「方法一进来就自动拦」时，才需要 Spring 的 `@Validated`（或你自己写代理）。
+
+## 按这个顺序打开文件
+
+### 1. `pom.xml`
+
+`spring-boot-starter-validation` 拉进来的是两样东西：规范 API + Hibernate Validator 实现。
+Spring 没有另造一套 `@Size`。
+
+### 2. `dto/BasicConstraintsRequest.java`（规则）
+
+看文件头的 import：
+
+- `jakarta.validation.constraints.Size / Min / Max` → 标准
+- `org.hibernate.validator.constraints.Length` → 扩展，只给 String 用
+
+`dto/AddressDto.java`、`dto/NestedUserRequest.java`、`dto/GroupedUserRequest.java`、`group/*` 同一层。
+`NestedUserRequest.address` 上的 `@Valid` 是标准的「级联开关」：去掉它，里面的 city/detail 不会被查。
+
+### 3. `service/ManualValidateService.java`（标准触发，无切面）
+
+```java
+validator.validate(request);
+```
+
+这就是规范里的动作。对应接口 `POST /api/manual`：
+`web/ManualValidateController` 上**没有** `@Valid`，所以校验不是 Spring 自动做的。
+
+### 4. `web/BasicConstraintsController.java`（Spring 替你触发，仍用标准 @Valid）
+
+```java
+create(@Valid @RequestBody BasicConstraintsRequest request)
+```
+
+- `@Valid` 的 import 是 `jakarta.validation.Valid`（标准）
+- `@RequestBody` / `@RestController` 是 Spring
+
+Spring MVC 在 JSON 绑成对象之后调用校验。你没写切面。
+
+### 5. `web/GroupedController.java`（Spring 多出来的：分组）
+
+import 变成 `org.springframework.validation.annotation.Validated`。
+
+```java
+@Validated(CreateGroup.class)
+```
+
+标准 `@Valid` 写不出括号里的分组。分组本身（`CreateGroup`）仍是普通空接口，属于标准的 groups 机制。
+
+### 6. `web/PathParamController.java`（Spring 的方法代理）
+
+类上有 `@Validated`，参数上才有 `@Min` / `@Size`。
+这是「框架用代理拦方法」。标准只定义 `@Min`，不会在你进方法前拦住。
+
+### 7. `web/ValidationExceptionHandler.java`（Spring 把结果变成 HTTP）
+
+同一份失败，两条路异常类型不同：
+
+| 你打的接口 | 谁触发的 | 异常类型 | JSON 里的 message |
+|-----------|----------|----------|-------------------|
+| `POST /api/basic` | Spring + `@Valid` | `MethodArgumentNotValidException` | 请求体校验失败 |
+| `POST /api/manual` | 你写的 `validate()` | `ConstraintViolationException` | 约束校验失败 |
+
+规则是同一份 `BasicConstraintsRequest`。message 不同，说明触发层不同。
+
+## 怎么跑、怎么对照
 
 ```powershell
-cd labs/valid-test   # 若已单独 clone 本仓，则在仓库根目录
+cd labs/valid-test
 mvn spring-boot:run
 ```
 
 服务：`http://localhost:8099`
 
-## 概念对照（先看这个）
-
-| 你听到的词 | 它到底是什么 |
-|-----------|-------------|
-| **validation** | Jakarta Bean Validation **规范**（API 包 `jakarta.validation`） |
-| **validate()** | `Validator` 接口上的**方法**，手动触发校验 |
-| **@Size / @Min / @Max** | 规范里的**标准约束注解** |
-| **@Length** | Hibernate Validator **扩展**注解（仅 String） |
-| **@Valid** | 规范里的**触发器**：校验 + 支持嵌套级联；不支持 groups |
-| **@Validated** | Spring **扩展触发器**：支持分组；类级可开方法参数校验 |
-
-## 五个实验
-
-### 1. 标准约束 `@Size` / `@Length` / `@Min` / `@Max`
-
-`POST /api/basic` —— 参数上 `@Valid`，失败会进统一异常处理。
+同一份坏数据打两次，看返回的 `message`：
 
 ```powershell
-# 故意写错：username 太短、age 超范围、tags 过多
-curl -s http://localhost:8099/api/basic -H "Content-Type: application/json" -d "{`"username`":`"ab`",`"password`":`"123456`",`"age`":200,`"tags`":[`"a`",`"b`",`"c`",`"d`",`"e`",`"f`"]}"
+curl -s http://localhost:8099/api/basic -H "Content-Type: application/json" -d "{`"username`":`"ab`",`"password`":`"123`",`"age`":200,`"tags`":[]}"
+curl -s http://localhost:8099/api/manual -H "Content-Type: application/json" -d "{`"username`":`"ab`",`"password`":`"123`",`"age`":200,`"tags`":[]}"
 ```
 
-合法示例：
+其它接口（确认分层之后再玩）：
 
 ```powershell
-curl -s http://localhost:8099/api/basic -H "Content-Type: application/json" -d "{`"username`":`"alice`",`"password`":`"secret1`",`"age`":20,`"tags`":[`"java`",`"spring`"]}"
-```
-
-看代码：`BasicConstraintsRequest`（`@Size` vs `@Length`）、`BasicConstraintsController`。
-
----
-
-### 2. 嵌套级联 `@Valid`
-
-`POST /api/nested` —— `address` 字段上有 `@Valid` 才会校验内部的 `city` / `detail`。
-
-```powershell
-# address.city 为空 → 报错
+# 嵌套：address.city 空。看 NestedUserRequest 字段上的 @Valid
 curl -s http://localhost:8099/api/nested -H "Content-Type: application/json" -d "{`"name`":`"bob`",`"address`":{`"city`":`"`",`"detail`":`"road`"}}"
-```
 
-自己试：去掉 `NestedUserRequest.address` 上的 `@Valid` 再请求，会发现内部注解不生效。
-
----
-
-### 3. 分组校验 `@Validated(Group)`
-
-同一 DTO，创建 / 更新规则不同。**只能用 `@Validated`，标准 `@Valid` 不能指定 groups。**
-
-```powershell
-# 创建：带了 id → 失败（CreateGroup 要求 id 为 null）
+# 分组：创建时带 id 会失败。看 GroupedController 的 @Validated(CreateGroup)
 curl -s http://localhost:8099/api/grouped -H "Content-Type: application/json" -d "{`"id`":1,`"username`":`"alice`",`"password`":`"secret1`"}"
 
-# 创建：正确
-curl -s http://localhost:8099/api/grouped -H "Content-Type: application/json" -d "{`"username`":`"alice`",`"password`":`"secret1`"}"
-
-# 更新：缺 id → 失败
-curl -s -X PUT http://localhost:8099/api/grouped -H "Content-Type: application/json" -d "{`"username`":`"alice`"}"
-
-# 更新：正确
-curl -s -X PUT http://localhost:8099/api/grouped -H "Content-Type: application/json" -d "{`"id`":1,`"username`":`"alice`",`"password`":`"secret1`"}"
-```
-
-看代码：`GroupedUserRequest` + `CreateGroup` / `UpdateGroup` + `GroupedController`。
-
----
-
-### 4. 手动 `validator.validate()`
-
-`POST /api/manual` —— Controller **不加** `@Valid`，在 Service 里编程式校验。
-
-```powershell
-curl -s http://localhost:8099/api/manual -H "Content-Type: application/json" -d "{`"username`":`"x`",`"password`":`"123`",`"age`":0,`"tags`":[]}"
-```
-
-看代码：`ManualValidateService`。这就是「validation 规范」里的核心动作方法。
-
----
-
-### 5. 方法参数 / Path / Query 校验
-
-需要类上有 `@Validated`（本实验在 `PathParamController` 上已标）。
-
-```powershell
-# id 超范围
+# 方法参数：id=0 失败。看 PathParamController 类上的 @Validated
 curl -s "http://localhost:8099/api/params/users/0?nickname=a"
-
-# 合法
-curl -s "http://localhost:8099/api/params/users/42?nickname=neo"
 ```
-
-## 目录
-
-```text
-src/main/java/com/demo/valid/
-├── ValidTestApplication.java      # 启动类（类上 @Validated）
-├── dto/                           # 带约束注解的请求体
-├── group/                         # CreateGroup / UpdateGroup
-├── service/ManualValidateService  # validate() 手动触发
-└── web/                           # 5 组 Controller + 异常转 JSON
-```
-
-## 建议玩法
-
-1. 先打挂 `/api/basic`，看 JSON 里 `field` / `message`。
-2. 改注解边界（比如 `@Size(min=5)`），重启再打，确认语义。
-3. 对比 `/api/basic`（注解自动）和 `/api/manual`（手写 validate）。
-4. 在分组接口上来回切换 Create / Update，体会为什么需要 `@Validated`。
